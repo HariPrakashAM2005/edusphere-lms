@@ -1,0 +1,268 @@
+version: '3.8'
+
+networks:
+  edusphere-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  mysql_data:
+    driver: local
+  redis_data:
+    driver: local
+  nginx_logs:
+    driver: local
+  backend_logs:
+    driver: local
+
+services:
+  # ─────────────────────────────────────────
+  # DATABASE – MySQL 8.0
+  # ─────────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: edusphere-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: edusphere
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./infra/mysql/my.cnf:/etc/mysql/conf.d/custom.cnf:ro
+      - ./infra/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      edusphere-net:
+        ipv4_address: 172.20.0.10
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    command: >
+      --default-authentication-plugin=mysql_native_password
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --innodb-buffer-pool-size=256M
+      --max-connections=200
+      --slow-query-log=1
+      --slow-query-log-file=/var/log/mysql/slow.log
+      --long-query-time=2
+
+  # ─────────────────────────────────────────
+  # CACHE – Redis 7.2
+  # ─────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: edusphere-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --appendfsync everysec
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+    volumes:
+      - redis_data:/data
+    networks:
+      edusphere-net:
+        ipv4_address: 172.20.0.11
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────
+  # BACKEND – Node.js API with PM2
+  # ─────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.backend.prod
+      args:
+        NODE_ENV: production
+    image: edusphere/backend:latest
+    container_name: edusphere-backend
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      DATABASE_URL: mysql://${MYSQL_USER}:${MYSQL_PASSWORD}@mysql:3306/edusphere
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+    volumes:
+      - backend_logs:/app/logs
+      - ./backend/prisma:/app/prisma:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      edusphere-net:
+        ipv4_address: 172.20.0.20
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+  # ─────────────────────────────────────────
+  # FRONTEND – Student Portal (Next.js)
+  # ─────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.frontend.prod
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+        NEXT_PUBLIC_SOCKET_URL: ${NEXT_PUBLIC_SOCKET_URL}
+    image: edusphere/frontend:latest
+    container_name: edusphere-frontend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+      NEXT_PUBLIC_SOCKET_URL: ${NEXT_PUBLIC_SOCKET_URL}
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      edusphere-net:
+        ipv4_address: 172.20.0.21
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+
+  # ─────────────────────────────────────────
+  # ADMIN PANEL – Faculty/Admin Portal (Next.js)
+  # ─────────────────────────────────────────
+  admin:
+    build:
+      context: ./backend-admin
+      dockerfile: Dockerfile.frontend.prod
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+        NEXT_PUBLIC_SOCKET_URL: ${NEXT_PUBLIC_SOCKET_URL}
+    image: edusphere/admin:latest
+    container_name: edusphere-admin
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3002
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+      NEXT_PUBLIC_SOCKET_URL: ${NEXT_PUBLIC_SOCKET_URL}
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      edusphere-net:
+        ipv4_address: 172.20.0.22
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3002"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+
+  # ─────────────────────────────────────────
+  # REVERSE PROXY – Nginx with SSL
+  # ─────────────────────────────────────────
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: edusphere-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infra/nginx/sites:/etc/nginx/sites-enabled:ro
+      - ./infra/ssl:/etc/nginx/ssl:ro
+      - nginx_logs:/var/log/nginx
+      - ./infra/nginx/dhparam.pem:/etc/nginx/dhparam.pem:ro
+    depends_on:
+      - frontend
+      - backend
+      - admin
+    networks:
+      edusphere-net:
+        ipv4_address: 172.20.0.5
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ─────────────────────────────────────────
+  # DB ADMIN – Adminer (IP-restricted via Nginx)
+  # ─────────────────────────────────────────
+  adminer:
+    image: adminer:4.8.1
+    container_name: edusphere-adminer
+    restart: unless-stopped
+    environment:
+      ADMINER_DEFAULT_SERVER: mysql
+      ADMINER_DESIGN: pepa-linha-dark
+    networks:
+      edusphere-net:
+        ipv4_address: 172.20.0.30
+    depends_on:
+      mysql:
+        condition: service_healthy
+    # Not exposed directly — access only via Nginx with IP restriction
+    expose:
+      - "8080"
+
+  # ─────────────────────────────────────────
+  # MIGRATIONS – One-shot Prisma migrator
+  # ─────────────────────────────────────────
+  migrator:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.backend.prod
+    container_name: edusphere-migrator
+    restart: "no"
+    env_file:
+      - .env.production
+    environment:
+      DATABASE_URL: mysql://${MYSQL_USER}:${MYSQL_PASSWORD}@mysql:3306/edusphere
+    command: ["npx", "prisma", "migrate", "deploy"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - edusphere-net

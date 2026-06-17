@@ -1,0 +1,60 @@
+# ─────────────────────────────────────────────────────
+# Stage 1: DEPS – install dependencies
+# ─────────────────────────────────────────────────────
+FROM node:20-alpine AS deps
+
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+# ─────────────────────────────────────────────────────
+# Stage 2: BUILDER – build Next.js app
+# ─────────────────────────────────────────────────────
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# Accept build-time env vars (baked into static JS)
+ARG NEXT_PUBLIC_API_URL
+ARG NEXT_PUBLIC_SOCKET_URL
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_SOCKET_URL=$NEXT_PUBLIC_SOCKET_URL
+ENV NEXT_TELEMETRY_DISABLED=1
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+# Build Next.js with standalone output
+RUN npm run build
+
+# ─────────────────────────────────────────────────────
+# Stage 3: RUNNER – minimal production image
+# ─────────────────────────────────────────────────────
+FROM node:20-alpine AS runner
+
+RUN apk add --no-cache dumb-init wget \
+  && addgroup -g 1001 -S nodejs \
+  && adduser -S nextjs -u 1001
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV PORT=3000
+
+# Copy standalone build output
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+COPY --from=builder --chown=nextjs:nodejs /app/public ./public
+
+USER nextjs
+
+EXPOSE 3000
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
+  CMD wget -qO- http://localhost:${PORT:-3000} || exit 1
+
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["node", "server.js"]
