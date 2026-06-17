@@ -10,6 +10,10 @@
     "resolveJsonModule": true,
     "moduleResolution": "node",
     "types": ["node"],
-    "ignoreDeprecations": "6.0"
-  }
+    "ignoreDeprecations": "6.0",
+    "outDir": "./dist",
+    "rootDir": "./src"
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
 }
