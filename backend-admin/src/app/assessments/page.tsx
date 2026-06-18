@@ -407,6 +407,8 @@ print(caesar_encrypt("HELLO", 4)) # Output: LIPPS`,
   ]
 };
 
+const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:3001';
+
 export default function AssessmentsPage() {
   const [assessments, setAssessments] = useState<Assessment[]>(INITIAL_ASSESSMENTS);
   const [attemptsDb, setAttemptsDb] = useState<Record<string, StudentAttempt[]>>(INITIAL_MOCK_ATTEMPTS);
@@ -420,7 +422,7 @@ export default function AssessmentsPage() {
 
   // Establish Socket.io connection for real-time submission listening
   useEffect(() => {
-    const socket = io('http://localhost:3001');
+    const socket = io(SOCKET_URL);
 
     socket.on('connect', () => {
       console.log('🔌 Admin connected to real-time socket server');
@@ -595,7 +597,7 @@ export default function AssessmentsPage() {
 
     // Emit socket event to notify student in real-time
     try {
-      const socket = io('http://localhost:3001');
+      const socket = io(SOCKET_URL);
       socket.emit('submit_grade', {
         studentEmail: currentAttempt.studentEmail,
         score: totalScore,
